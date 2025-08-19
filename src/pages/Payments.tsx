@@ -9,25 +9,42 @@ import {
   CheckCircle,
   Receipt
 } from 'lucide-react';
-import { StorageService } from '../utils/storage';
+import { workerService } from '../services/workerService';
+import { paymentService } from '../services/paymentService';
 import { CalculationService } from '../utils/calculations';
-import { Worker } from '../types';
+import { WorkerBalance } from '../types';
 
 const Payments: React.FC = () => {
-  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [workers, setWorkers] = useState<WorkerBalance[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const [formData, setFormData] = useState({
     workerId: '',
     date: new Date().toISOString().split('T')[0],
     amount: '',
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [selectedWorker, setSelectedWorker] = useState<Worker | null>(null);
+  const [selectedWorker, setSelectedWorker] = useState<WorkerBalance | null>(null);
   const [showConfirmation, setShowConfirmation] = useState(false);
 
   useEffect(() => {
-    setWorkers(StorageService.getWorkers());
+    loadData();
   }, []);
 
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      const workersData = await workerService.getWorkersWithBalances();
+      setWorkers(workersData);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load workers');
+      console.error('Error loading workers:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
   useEffect(() => {
     if (formData.workerId) {
       const worker = workers.find(w => w.id === formData.workerId);
@@ -66,16 +83,17 @@ const Payments: React.FC = () => {
     setShowConfirmation(true);
   };
 
-  const confirmPayment = () => {
+  const confirmPayment = async () => {
     try {
+      setSubmitting(true);
+      setError('');
+      
       const amount = parseFloat(formData.amount);
 
-      StorageService.addTransaction({
-        workerId: formData.workerId,
-        date: formData.date,
-        type: 'payment',
-        amount: amount,
-        narration: `Payment made`,
+      await paymentService.createPayment({
+        worker_id: formData.workerId,
+        date_of_payment: formData.date,
+        payment_amount: amount,
       });
 
       // Reset form
@@ -86,28 +104,38 @@ const Payments: React.FC = () => {
       });
 
       // Reload workers to get updated balances
-      setWorkers(StorageService.getWorkers());
+      await loadData();
       setShowConfirmation(false);
-      
-      alert('Payment recorded successfully!');
     } catch (error) {
       console.error('Error recording payment:', error);
-      alert('Error recording payment. Please try again.');
+      setError(error instanceof Error ? error.message : 'Error recording payment. Please try again.');
+    } finally {
+      setSubmitting(false);
     }
   };
 
   const projectedBalance = selectedWorker && formData.amount ? 
-    selectedWorker.currentBalance - parseFloat(formData.amount) : 
-    selectedWorker?.currentBalance || 0;
+  (selectedWorker.current_balance ?? 0) - parseFloat(formData.amount) :
+    selectedWorker?.current_balance || 0;
 
   const currentBalanceStatus = selectedWorker ? 
-    CalculationService.getBalanceStatus(selectedWorker.currentBalance) : null;
+  CalculationService.getBalanceStatus(selectedWorker.current_balance ?? 0) : null;
     
   const projectedBalanceStatus = selectedWorker && formData.amount ? 
     CalculationService.getBalanceStatus(projectedBalance) : null;
 
-  const workersWithBalance = workers.filter(w => w.currentBalance !== 0);
+  const workersWithBalance = workers.filter(w => w.current_balance !== 0);
 
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading workers...</p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       {/* Header */}
@@ -116,6 +144,13 @@ const Payments: React.FC = () => {
         <p className="text-gray-600 mt-1">Record payments made to workers</p>
       </div>
 
+      {/* Error Message */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-center">
+          <AlertCircle className="h-5 w-5 text-red-600 mr-2" />
+          <span className="text-red-700">{error}</span>
+        </div>
+      )}
       {/* Quick Stats */}
       <div className="grid grid-cols-2 gap-4">
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
@@ -134,8 +169,8 @@ const Payments: React.FC = () => {
               <p className="text-sm font-medium text-gray-600">Total Outstanding</p>
               <p className="text-2xl font-bold text-red-600">
                 {CalculationService.formatCurrency(
-                  workers.filter(w => w.currentBalance > 0)
-                    .reduce((sum, w) => sum + w.currentBalance, 0)
+                  workers.filter(w => (w.current_balance ?? 0) > 0)
+                    .reduce((sum, w) => sum + (w.current_balance ?? 0), 0)
                 )}
               </p>
             </div>
@@ -169,7 +204,7 @@ const Payments: React.FC = () => {
             >
               <option value="">Choose a worker...</option>
               {workers.map(worker => {
-                const balanceInfo = CalculationService.getBalanceStatus(worker.currentBalance);
+                const balanceInfo = CalculationService.getBalanceStatus(worker.current_balance ?? 0);
                 return (
                   <option key={worker.id} value={worker.id}>
                     {worker.name} - {balanceInfo.message}
@@ -226,9 +261,9 @@ const Payments: React.FC = () => {
                   <span className="text-sm text-gray-600">Current Balance:</span>
                   <div className="text-right">
                     <span className={`text-sm font-semibold ${
-                      selectedWorker.currentBalance >= 0 ? 'text-red-600' : 'text-green-600'
+                      (selectedWorker.current_balance ?? 0) >= 0 ? 'text-red-600' : 'text-green-600'
                     }`}>
-                      {CalculationService.formatCurrency(selectedWorker.currentBalance)}
+                      {CalculationService.formatCurrency(selectedWorker.current_balance ?? 0)}
                     </span>
                     {currentBalanceStatus && (
                       <div className="mt-1">
@@ -264,7 +299,7 @@ const Payments: React.FC = () => {
                 )}
               </div>
 
-              {formData.amount && parseFloat(formData.amount) > selectedWorker.currentBalance && (
+              {formData.amount && parseFloat(formData.amount) > (selectedWorker.current_balance ?? 0) && (
                 <div className="mt-3 p-3 bg-orange-50 border border-orange-200 rounded-lg">
                   <div className="flex items-center">
                     <AlertCircle className="h-4 w-4 text-orange-600 mr-2" />
@@ -307,7 +342,7 @@ const Payments: React.FC = () => {
           ) : (
             <div className="space-y-3">
               {workersWithBalance.map(worker => {
-                const balanceStatus = CalculationService.getBalanceStatus(worker.currentBalance);
+                const balanceStatus = CalculationService.getBalanceStatus(worker.current_balance ?? 0);
                 return (
                   <div
                     key={worker.id}
@@ -320,9 +355,9 @@ const Payments: React.FC = () => {
                     </div>
                     <div className="text-right">
                       <div className={`text-sm font-semibold ${
-                        worker.currentBalance >= 0 ? 'text-red-600' : 'text-green-600'
+                        (worker.current_balance ?? 0) >= 0 ? 'text-red-600' : 'text-green-600'
                       }`}>
-                        {CalculationService.formatCurrency(worker.currentBalance)}
+                        {CalculationService.formatCurrency(worker.current_balance ?? 0)}
                       </div>
                       <div className="mt-1">
                         <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium border ${balanceStatus.color}`}>
@@ -356,8 +391,8 @@ const Payments: React.FC = () => {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-600">Current Balance:</span>
-                  <span className={`font-medium ${selectedWorker.currentBalance >= 0 ? 'text-red-600' : 'text-green-600'}`}>
-                    {CalculationService.formatCurrency(selectedWorker.currentBalance)}
+                  <span className={`font-medium ${(selectedWorker.current_balance ?? 0) >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+                    {CalculationService.formatCurrency(selectedWorker.current_balance ?? 0)}
                   </span>
                 </div>
                 <div className="flex justify-between pt-2 border-t">
@@ -372,6 +407,7 @@ const Payments: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setShowConfirmation(false)}
+                  disabled={submitting}
                   className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
                 >
                   Cancel
@@ -379,9 +415,17 @@ const Payments: React.FC = () => {
                 <button
                   type="button"
                   onClick={confirmPayment}
-                  className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                  disabled={submitting}
+                  className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-green-400 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
                 >
-                  Confirm Payment
+                  {submitting ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                      Processing...
+                    </>
+                  ) : (
+                    'Confirm Payment'
+                  )}
                 </button>
               </div>
             </div>

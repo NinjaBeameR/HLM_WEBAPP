@@ -10,12 +10,16 @@ import {
   XCircle,
   Clock
 } from 'lucide-react';
-import { StorageService } from '../utils/storage';
+import { workerService } from '../services/workerService';
+import { attendanceService } from '../services/attendanceService';
 import { CalculationService } from '../utils/calculations';
-import { Worker } from '../types';
+import { WorkerBalance } from '../types';
 
 const DailyEntry: React.FC = () => {
-  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [workers, setWorkers] = useState<WorkerBalance[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const [formData, setFormData] = useState({
     workerId: '',
     date: new Date().toISOString().split('T')[0],
@@ -25,18 +29,31 @@ const DailyEntry: React.FC = () => {
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [currentBalance, setCurrentBalance] = useState<number>(0);
-  const [selectedWorker, setSelectedWorker] = useState<Worker | null>(null);
+  const [selectedWorker, setSelectedWorker] = useState<WorkerBalance | null>(null);
 
   useEffect(() => {
-    setWorkers(StorageService.getWorkers());
+    loadData();
   }, []);
 
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      const workersData = await workerService.getWorkersWithBalances();
+      setWorkers(workersData);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load workers');
+      console.error('Error loading workers:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
   useEffect(() => {
     if (formData.workerId) {
       const worker = workers.find(w => w.id === formData.workerId);
       if (worker) {
         setSelectedWorker(worker);
-        setCurrentBalance(worker.currentBalance);
+  setCurrentBalance(worker.current_balance ?? 0);
       }
     } else {
       setSelectedWorker(null);
@@ -49,9 +66,9 @@ const DailyEntry: React.FC = () => {
     if (selectedWorker && formData.amount) {
       const amount = parseFloat(formData.amount) || 0;
       const attendanceAmount = CalculationService.getAttendanceAmount(formData.attendance, amount);
-      setCurrentBalance(selectedWorker.currentBalance + attendanceAmount);
+  setCurrentBalance((selectedWorker.current_balance ?? 0) + attendanceAmount);
     } else if (selectedWorker) {
-      setCurrentBalance(selectedWorker.currentBalance);
+  setCurrentBalance(selectedWorker.current_balance ?? 0);
     }
   }, [selectedWorker, formData.amount, formData.attendance]);
 
@@ -76,20 +93,29 @@ const DailyEntry: React.FC = () => {
     return Object.keys(newErrors).length === 0;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
     if (!validateForm()) return;
 
     try {
+      setSubmitting(true);
+      setError('');
+      
       const baseAmount = parseFloat(formData.amount);
       const finalAmount = CalculationService.getAttendanceAmount(formData.attendance, baseAmount);
 
-      StorageService.addTransaction({
-        workerId: formData.workerId,
+      // Check if attendance already exists for this worker on this date
+      const attendanceExists = await attendanceService.checkAttendanceExists(formData.workerId, formData.date);
+      if (attendanceExists) {
+        setError('Attendance already recorded for this worker on this date');
+        return;
+      }
+
+      await attendanceService.createAttendanceEntry({
+        worker_id: formData.workerId,
         date: formData.date,
-        type: 'attendance',
-        attendance: formData.attendance as 'present' | 'absent' | 'half-day',
+        attendance: formData.attendance === 'present',
         amount: finalAmount,
         narration: formData.narration.trim(),
       });
@@ -104,12 +130,12 @@ const DailyEntry: React.FC = () => {
       });
 
       // Reload workers to get updated balances
-      setWorkers(StorageService.getWorkers());
-      
-      alert('Attendance entry added successfully!');
+      await loadData();
     } catch (error) {
       console.error('Error adding entry:', error);
-      alert('Error adding entry. Please try again.');
+      setError(error instanceof Error ? error.message : 'Error adding entry. Please try again.');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -144,6 +170,16 @@ const DailyEntry: React.FC = () => {
 
   const balanceStatus = CalculationService.getBalanceStatus(currentBalance);
 
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading workers...</p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       {/* Header */}
@@ -152,6 +188,13 @@ const DailyEntry: React.FC = () => {
         <p className="text-gray-600 mt-1">Record worker attendance and wages</p>
       </div>
 
+      {/* Error Message */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-center">
+          <XCircle className="h-5 w-5 text-red-600 mr-2" />
+          <span className="text-red-700">{error}</span>
+        </div>
+      )}
       {/* Main Form */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200">
         <div className="p-6 border-b border-gray-200">
@@ -285,8 +328,8 @@ const DailyEntry: React.FC = () => {
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
                   <span className="text-gray-600">Current Balance:</span>
-                  <p className={`font-semibold ${selectedWorker.currentBalance >= 0 ? 'text-red-600' : 'text-green-600'}`}>
-                    {CalculationService.formatCurrency(selectedWorker.currentBalance)}
+                  <p className={`font-semibold ${(selectedWorker.current_balance ?? 0) >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+                    {CalculationService.formatCurrency(selectedWorker.current_balance ?? 0)}
                   </p>
                 </div>
                 <div>
@@ -308,10 +351,20 @@ const DailyEntry: React.FC = () => {
           <div className="pt-4">
             <button
               type="submit"
-              className="w-full bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center font-medium"
+              disabled={submitting}
+              className="w-full bg-blue-600 text-white py-3 px-4 rounded-lg hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed transition-colors flex items-center justify-center font-medium"
             >
-              <Save size={20} className="mr-2" />
-              Save Attendance Entry
+              {submitting ? (
+                <>
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+                  Saving...
+                </>
+              ) : (
+                <>
+                  <Save size={20} className="mr-2" />
+                  Save Attendance Entry
+                </>
+              )}
             </button>
           </div>
         </form>
@@ -329,7 +382,7 @@ const DailyEntry: React.FC = () => {
             <div>
               <span className="text-gray-600">Active Workers:</span>
               <p className="text-xl font-bold text-green-600">
-                {workers.filter(w => w.currentBalance !== 0).length}
+                {workers.filter(w => w.current_balance !== 0).length}
               </p>
             </div>
           </div>

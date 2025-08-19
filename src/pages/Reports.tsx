@@ -9,30 +9,58 @@ import {
   TrendingDown,
   Activity
 } from 'lucide-react';
-import { StorageService } from '../utils/storage';
+import { workerService } from '../services/workerService';
+import { attendanceService } from '../services/attendanceService';
+import { paymentService } from '../services/paymentService';
 import { CalculationService } from '../utils/calculations';
 import { ExportService } from '../utils/exports';
-import { Worker, Transaction } from '../types';
+import { WorkerBalance, AttendanceEntry, Payment } from '../types';
 
 const Reports: React.FC = () => {
-  const [workers, setWorkers] = useState<Worker[]>([]);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [workers, setWorkers] = useState<WorkerBalance[]>([]);
+  const [attendanceEntries, setAttendanceEntries] = useState<AttendanceEntry[]>([]);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [selectedWorkerId, setSelectedWorkerId] = useState('');
   const [dateRange, setDateRange] = useState({
     from: '',
     to: '',
   });
-  const [filteredTransactions, setFilteredTransactions] = useState<Transaction[]>([]);
-  const [selectedWorker, setSelectedWorker] = useState<Worker | null>(null);
+  const [filteredTransactions, setFilteredTransactions] = useState<any[]>([]);
+  const [selectedWorker, setSelectedWorker] = useState<WorkerBalance | null>(null);
 
   useEffect(() => {
-    setWorkers(StorageService.getWorkers());
-    setTransactions(StorageService.getTransactions());
+    loadData();
   }, []);
 
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      
+      const workersData = await workerService.getWorkersWithBalances();
+      setWorkers(workersData);
+      
+      // Load transactions if date range is selected
+      if (dateRange.from && dateRange.to) {
+        const [attendanceData, paymentsData] = await Promise.all([
+          attendanceService.getAttendanceByDateRange(dateRange.from, dateRange.to),
+          paymentService.getPaymentsByDateRange(dateRange.from, dateRange.to)
+        ]);
+        setAttendanceEntries(attendanceData);
+        setPayments(paymentsData);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load data');
+      console.error('Error loading data:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
   useEffect(() => {
     filterTransactions();
-  }, [transactions, selectedWorkerId, dateRange]);
+  }, [attendanceEntries, payments, selectedWorkerId, dateRange]);
 
   useEffect(() => {
     if (selectedWorkerId) {
@@ -44,7 +72,32 @@ const Reports: React.FC = () => {
   }, [selectedWorkerId, workers]);
 
   const filterTransactions = () => {
-    let filtered = [...transactions];
+    // Combine attendance and payment entries into a unified transaction list
+    const attendanceTransactions = attendanceEntries.map(entry => ({
+      id: entry.id,
+      workerId: entry.worker_id,
+      date: entry.date,
+      type: 'attendance' as const,
+      attendance: entry.attendance ? 'present' : 'absent',
+      amount: entry.amount,
+      balance: entry.balance_after_entry || 0,
+      narration: entry.narration || '',
+      createdAt: entry.created_at
+    }));
+    
+    const paymentTransactions = payments.map(payment => ({
+      id: payment.id,
+      workerId: payment.worker_id,
+      date: payment.date_of_payment,
+      type: 'payment' as const,
+      attendance: undefined,
+      amount: payment.payment_amount,
+      balance: payment.balance_after_payment || 0,
+      narration: 'Payment made',
+      createdAt: payment.created_at
+    }));
+    
+    let filtered = [...attendanceTransactions, ...paymentTransactions];
 
     if (selectedWorkerId) {
       filtered = filtered.filter(t => t.workerId === selectedWorkerId);
@@ -88,7 +141,25 @@ const Reports: React.FC = () => {
 
   const handleExport = (type: 'csv' | 'pdf') => {
     const exportData = {
-      workers: selectedWorkerId ? workers.filter(w => w.id === selectedWorkerId) : workers,
+      workers: selectedWorkerId ? workers.filter(w => w.id === selectedWorkerId).map(w => ({
+        id: w.id!,
+        name: w.name!,
+        phone: w.phone || '',
+        category: w.category || '',
+        subcategory: w.subcategory || '',
+        openingBalance: w.opening_balance || 0,
+        currentBalance: w.current_balance || 0,
+        createdAt: ''
+      })) : workers.map(w => ({
+        id: w.id!,
+        name: w.name!,
+        phone: w.phone || '',
+        category: w.category || '',
+        subcategory: w.subcategory || '',
+        openingBalance: w.opening_balance || 0,
+        currentBalance: w.current_balance || 0,
+        createdAt: ''
+      })),
       transactions: filteredTransactions,
       dateRange: dateRange.from && dateRange.to ? dateRange : undefined,
       filters: { workerId: selectedWorkerId }
@@ -108,6 +179,16 @@ const Reports: React.FC = () => {
 
   const stats = getTransactionStats();
 
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading reports...</p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -134,6 +215,13 @@ const Reports: React.FC = () => {
         </div>
       </div>
 
+      {/* Error Message */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-center">
+          <div className="h-5 w-5 text-red-600 mr-2">⚠</div>
+          <span className="text-red-700">{error}</span>
+        </div>
+      )}
       {/* Filters */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <div className="flex items-center gap-2 mb-4">
@@ -169,7 +257,12 @@ const Reports: React.FC = () => {
             <input
               type="date"
               value={dateRange.from}
-              onChange={(e) => setDateRange({ ...dateRange, from: e.target.value })}
+              onChange={(e) => {
+                setDateRange({ ...dateRange, from: e.target.value });
+                if (e.target.value && dateRange.to) {
+                  loadData();
+                }
+              }}
               className="w-full rounded-lg border-gray-300 shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             />
           </div>
@@ -181,7 +274,12 @@ const Reports: React.FC = () => {
             <input
               type="date"
               value={dateRange.to}
-              onChange={(e) => setDateRange({ ...dateRange, to: e.target.value })}
+              onChange={(e) => {
+                setDateRange({ ...dateRange, to: e.target.value });
+                if (dateRange.from && e.target.value) {
+                  loadData();
+                }
+              }}
               className="w-full rounded-lg border-gray-300 shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             />
           </div>
@@ -211,19 +309,19 @@ const Reports: React.FC = () => {
             </div>
             <div className="text-center p-3 bg-blue-50 rounded-lg">
               <div className="text-xl font-bold text-blue-600">
-                {CalculationService.formatCurrency(selectedWorker.openingBalance)}
+                {CalculationService.formatCurrency(selectedWorker.opening_balance || 0)}
               </div>
               <div className="text-sm text-gray-600">Opening Balance</div>
             </div>
             <div className="text-center p-3 bg-green-50 rounded-lg">
-              <div className={`text-xl font-bold ${selectedWorker.currentBalance >= 0 ? 'text-red-600' : 'text-green-600'}`}>
-                {CalculationService.formatCurrency(selectedWorker.currentBalance)}
+              <div className={`text-xl font-bold ${(selectedWorker.current_balance || 0) >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+                {CalculationService.formatCurrency(selectedWorker.current_balance || 0)}
               </div>
               <div className="text-sm text-gray-600">Current Balance</div>
             </div>
             <div className="text-center p-3 bg-orange-50 rounded-lg">
               <div className="text-xl font-bold text-orange-600">
-                {CalculationService.formatPhone(selectedWorker.phone)}
+                {CalculationService.formatPhone(selectedWorker.phone || "")}
               </div>
               <div className="text-sm text-gray-600">Phone</div>
             </div>

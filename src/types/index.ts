@@ -39,3 +39,36 @@ export interface ExportData {
     category?: string;
   };
 }
+// WorkerBalance type for reports and balances
+export interface WorkerBalance {
+  id: string;
+  name: string;
+  phone?: string;
+  category?: string;
+  subcategory?: string;
+  opening_balance?: number;
+  current_balance?: number;
+  created_at?: string;
+}
+
+// AttendanceEntry type for attendance transactions
+export interface AttendanceEntry {
+  id: string;
+  worker_id: string;
+  date: string;
+  attendance: boolean;
+  amount: number;
+  balance_after_entry?: number;
+  narration?: string;
+  created_at?: string;
+}
+
+// Payment type for payment transactions
+export interface Payment {
+  id: string;
+  worker_id: string;
+  date_of_payment: string;
+  payment_amount: number;
+  balance_after_payment?: number;
+  created_at?: string;
+}

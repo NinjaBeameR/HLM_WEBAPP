@@ -9,44 +9,77 @@ import {
   User,
   Phone,
   DollarSign,
-  Tag
+  Tag,
+  Loader2,
+  AlertCircle
 } from 'lucide-react';
-import { StorageService } from '../utils/storage';
+import { workerService } from '../services/workerService';
 import { CalculationService } from '../utils/calculations';
-import { Worker, Category } from '../types';
+import { WorkerBalance } from '../types';
+
 
 const MasterData: React.FC = () => {
-  const [workers, setWorkers] = useState<Worker[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
+  const [workers, setWorkers] = useState<WorkerBalance[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingWorker, setEditingWorker] = useState<Worker | null>(null);
+  const [editingWorker, setEditingWorker] = useState<WorkerBalance | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   
   const [formData, setFormData] = useState({
     name: '',
     phone: '',
-    openingBalance: 0,
+    opening_balance: 0,
     category: '',
     subcategory: '',
   });
 
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  // Default categories
+  const categories = [
+    {
+      id: '1',
+      name: 'Construction',
+      subcategories: ['Mason', 'Carpenter', 'Electrician', 'Plumber', 'Helper', 'Supervisor']
+    },
+    {
+      id: '2',
+      name: 'Household',
+      subcategories: ['Cook', 'Cleaner', 'Gardener', 'Driver', 'Security', 'Caretaker']
+    },
+    {
+      id: '3',
+      name: 'General Labor',
+      subcategories: ['Daily Worker', 'Casual Labor', 'Seasonal Worker', 'Part-time', 'Contract Worker']
+    }
+  ];
+
   useEffect(() => {
     loadData();
   }, []);
 
-  const loadData = () => {
-    setWorkers(StorageService.getWorkers());
-    setCategories(StorageService.getCategories());
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      const workersData = await workerService.getWorkersWithBalances();
+      setWorkers(workersData);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load workers');
+      console.error('Error loading workers:', err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const resetForm = () => {
     setFormData({
       name: '',
       phone: '',
-      openingBalance: 0,
+      opening_balance: 0,
       category: '',
       subcategory: '',
     });
@@ -88,62 +121,67 @@ const MasterData: React.FC = () => {
     return Object.keys(newErrors).length === 0;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
     if (!validateForm()) return;
 
     try {
+      setSubmitting(true);
+      setError('');
+      
       if (editingWorker) {
         // Update existing worker (excluding opening balance and other immutable fields)
-        const updatedWorker = StorageService.updateWorker(editingWorker.id, {
+        await workerService.updateWorker(editingWorker.id!, {
           name: formData.name.trim(),
           phone: formData.phone.trim(),
           category: formData.category,
           subcategory: formData.subcategory,
         });
-        
-        if (updatedWorker) {
-          loadData();
-          setIsModalOpen(false);
-          resetForm();
-        }
       } else {
         // Add new worker
-        StorageService.addWorker({
+        await workerService.createWorker({
           name: formData.name.trim(),
           phone: formData.phone.trim(),
-          openingBalance: formData.openingBalance,
+          opening_balance: formData.opening_balance,
           category: formData.category,
           subcategory: formData.subcategory,
         });
-        
-        loadData();
-        setIsModalOpen(false);
-        resetForm();
       }
+      
+      await loadData();
+      setIsModalOpen(false);
+      resetForm();
     } catch (error) {
       console.error('Error saving worker:', error);
-      alert('Error saving worker. Please try again.');
+      setError(error instanceof Error ? error.message : 'Error saving worker. Please try again.');
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  const handleEdit = (worker: Worker) => {
+  const handleEdit = (worker: WorkerBalance) => {
     setEditingWorker(worker);
     setFormData({
-      name: worker.name,
-      phone: worker.phone,
-      openingBalance: worker.openingBalance,
-      category: worker.category,
-      subcategory: worker.subcategory,
+      name: worker.name || '',
+      phone: worker.phone || '',
+      opening_balance: worker.opening_balance || 0,
+      category: worker.category || '',
+      subcategory: worker.subcategory || '',
     });
     setIsModalOpen(true);
   };
 
-  const handleDelete = (worker: Worker) => {
+  const handleDelete = async (worker: WorkerBalance) => {
     if (window.confirm(`Are you sure you want to delete ${worker.name}? This will also delete all related transactions.`)) {
-      StorageService.deleteWorker(worker.id);
-      loadData();
+      try {
+        setError('');
+        await workerService.deleteWorker(worker.id!);
+        await loadData();
+      } catch (error) {
+        console.error('Error deleting worker:', error);
+        setError(error instanceof Error ? error.message : 'Error deleting worker. Please try again.');
+      }
     }
   };
 
@@ -153,8 +191,8 @@ const MasterData: React.FC = () => {
   };
 
   const filteredWorkers = workers.filter(worker => {
-    const matchesSearch = worker.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         worker.phone.includes(searchTerm);
+    const matchesSearch = worker.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                         worker.phone?.includes(searchTerm);
     const matchesCategory = !selectedCategory || worker.category === selectedCategory;
     return matchesSearch && matchesCategory;
   });
@@ -171,12 +209,21 @@ const MasterData: React.FC = () => {
         </div>
         <button
           onClick={openModal}
+          disabled={loading}
           className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
         >
           <Plus size={16} className="mr-2" />
           Add Worker
         </button>
       </div>
+
+      {/* Error Message */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-center">
+          <AlertCircle className="h-5 w-5 text-red-600 mr-2" />
+          <span className="text-red-700">{error}</span>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -207,6 +254,12 @@ const MasterData: React.FC = () => {
 
       {/* Workers Table */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        {loading ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+            <span className="ml-2 text-gray-600">Loading workers...</span>
+          </div>
+        ) : (
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
@@ -233,7 +286,7 @@ const MasterData: React.FC = () => {
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {filteredWorkers.map((worker) => {
-                const balanceStatus = CalculationService.getBalanceStatus(worker.currentBalance);
+                const balanceStatus = CalculationService.getBalanceStatus(worker.current_balance || 0);
                 
                 return (
                   <tr key={worker.id} className="hover:bg-gray-50">
@@ -255,16 +308,16 @@ const MasterData: React.FC = () => {
                       <div className="text-sm text-gray-500">{worker.subcategory}</div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {CalculationService.formatPhone(worker.phone)}
+                      {CalculationService.formatPhone(worker.phone || '')}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
-                      {CalculationService.formatCurrency(worker.openingBalance)}
+                      {CalculationService.formatCurrency(worker.opening_balance || 0)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right">
                       <span className={`text-sm font-medium ${
-                        worker.currentBalance >= 0 ? 'text-red-600' : 'text-green-600'
+                        (worker.current_balance || 0) >= 0 ? 'text-red-600' : 'text-green-600'
                       }`}>
-                        {CalculationService.formatCurrency(worker.currentBalance)}
+                        {CalculationService.formatCurrency(worker.current_balance || 0)}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-center">
@@ -301,6 +354,7 @@ const MasterData: React.FC = () => {
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* Add/Edit Modal */}
@@ -318,6 +372,13 @@ const MasterData: React.FC = () => {
                 <X size={24} />
               </button>
             </div>
+
+            {error && (
+              <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-center">
+                <AlertCircle className="h-4 w-4 text-red-600 mr-2" />
+                <span className="text-sm text-red-700">{error}</span>
+              </div>
+            )}
 
             <form onSubmit={handleSubmit} className="p-6 space-y-4">
               <div>
@@ -403,8 +464,8 @@ const MasterData: React.FC = () => {
                   <input
                     type="number"
                     step="0.01"
-                    value={formData.openingBalance}
-                    onChange={(e) => setFormData({ ...formData, openingBalance: parseFloat(e.target.value) || 0 })}
+                    value={formData.opening_balance}
+                    onChange={(e) => setFormData({ ...formData, opening_balance: parseFloat(e.target.value) || 0 })}
                     className="w-full rounded-lg border-gray-300 shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     placeholder="0.00"
                   />
@@ -424,10 +485,20 @@ const MasterData: React.FC = () => {
                 </button>
                 <button
                   type="submit"
+                  disabled={submitting}
                   className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center"
                 >
-                  <Save size={16} className="mr-2" />
-                  {editingWorker ? 'Update' : 'Add'} Worker
+                  {submitting ? (
+                    <>
+                      <Loader2 size={16} className="mr-2 animate-spin" />
+                      {editingWorker ? 'Updating...' : 'Adding...'}
+                    </>
+                  ) : (
+                    <>
+                      <Save size={16} className="mr-2" />
+                      {editingWorker ? 'Update' : 'Add'} Worker
+                    </>
+                  )}
                 </button>
               </div>
             </form>
